@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: esp32-bridge
+    env: node
+    plan: free
+    buildCommand: "npm install"
+    startCommand: "npm start"
