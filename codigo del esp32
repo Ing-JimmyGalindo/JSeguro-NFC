@@ -1,0 +1,176 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <WiFiManager.h>
+#include <SPI.h>
+#include <MFRC522.h>
+
+#define SS_PIN 5
+#define RST_PIN 22
+#define LED_PIN 4
+
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+// URL dinámica desde InfinityFree
+String configURL = "https://jseguro.gamer.gd/config.php?api=1";
+
+void setup() {
+
+  Serial.begin(115200);
+
+  // SPI + RFID
+  SPI.begin();
+  rfid.PCD_Init();
+
+  // LED
+  pinMode(LED_PIN, OUTPUT);
+
+  // =========================
+  // WIFI MANAGER
+  // =========================
+
+  WiFiManager wm;
+
+  // DESCOMENTAR SOLO PARA
+  // BORRAR WIFI GUARDADO
+  // wm.resetSettings();
+
+  bool res;
+
+  // Nombre del AP
+  res = wm.autoConnect("NFC-Control");
+
+  if (!res) {
+
+    Serial.println("No conectado al WiFi");
+
+  } else {
+
+    Serial.println("WiFi conectado");
+
+    Serial.print("IP del ESP32: ");
+    Serial.println(WiFi.localIP());
+  }
+}
+
+void loop() {
+
+  // Esperar tarjeta NFC
+  if (!rfid.PICC_IsNewCardPresent()) return;
+  if (!rfid.PICC_ReadCardSerial()) return;
+
+  digitalWrite(LED_PIN, HIGH);
+
+  // =========================
+  // CONSTRUIR UID
+  // =========================
+
+  String uid = "";
+
+  for (byte i = 0; i < rfid.uid.size; i++) {
+
+    if (rfid.uid.uidByte[i] < 0x10) {
+      uid += "0";
+    }
+
+    uid += String(rfid.uid.uidByte[i], HEX);
+  }
+
+  uid.toLowerCase();
+
+  Serial.println("UID: " + uid);
+
+  // =========================
+  // VERIFICAR WIFI
+  // =========================
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    WiFiClientSecure client;
+    client.setInsecure();
+
+    HTTPClient http;
+
+    // =========================
+    // OBTENER URL DINÁMICA
+    // =========================
+
+    Serial.println("Obteniendo backend...");
+
+    http.begin(client, configURL);
+
+    int configCode = http.GET();
+
+    String dynamicURL = "";
+
+    if (configCode > 0) {
+
+      dynamicURL = http.getString();
+
+      dynamicURL.trim();
+
+      Serial.println("Backend URL:");
+      Serial.println(dynamicURL);
+
+    } else {
+
+      Serial.println("No se pudo obtener backend");
+
+      http.end();
+
+      digitalWrite(LED_PIN, LOW);
+
+      return;
+    }
+
+    http.end();
+
+    // =========================
+    // CONSTRUIR URL FINAL
+    // =========================
+
+    String finalURL =
+      dynamicURL +
+      "/nfc/guardar.php?uid=" +
+      uid;
+
+    Serial.println("Enviando a:");
+    Serial.println(finalURL);
+
+    // =========================
+    // ENVIAR ASISTENCIA
+    // =========================
+
+    HTTPClient http2;
+
+    http2.begin(client, finalURL);
+
+    int httpCode = http2.GET();
+
+    Serial.print("HTTP Code: ");
+    Serial.println(httpCode);
+
+    if (httpCode > 0) {
+
+      String payload = http2.getString();
+
+      Serial.println("Respuesta:");
+      Serial.println(payload);
+
+    } else {
+
+      Serial.println("Error enviando asistencia");
+    }
+
+    http2.end();
+
+  } else {
+
+    Serial.println("WiFi desconectado");
+  }
+
+  digitalWrite(LED_PIN, LOW);
+
+  // Evitar lecturas repetidas
+  delay(3000);
+}
