@@ -1,0 +1,223 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <WiFiManager.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include <ESPmDNS.h>
+
+// ================= HARDWARE =================
+#define SS_PIN 5
+#define RST_PIN 22
+#define LED_PIN 4
+
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+// ================= WEB + STORAGE =================
+WebServer server(80);
+Preferences prefs;
+
+// ================= CONFIG =================
+String backendURL = "";
+const String secretToken = "73cf4734";
+
+
+// ================= SEGURIDAD SIMPLE =================
+bool allowed() {
+  return server.hasArg("t") && server.arg("t") == secretToken;
+}
+
+
+// ================= PANEL PRINCIPAL =================
+void handleRoot() {
+
+  if (!allowed()) {
+    server.send(404, "text/plain", "Not Found");
+    return;
+  }
+
+  String html = "<html><body style='font-family:Arial;text-align:center;'>";
+  html += "<h1>ESP32 NFC PANEL</h1>";
+
+  html += "<p><b>WiFi:</b> " + WiFi.SSID() + "</p>";
+  html += "<p><b>IP:</b> " + WiFi.localIP().toString() + "</p>";
+  html += "<p><b>Backend:</b> " + backendURL + "</p>";
+
+  html += "<hr>";
+
+  html += "<a href='/config?t=" + secretToken + "'><button>Config Backend</button></a><br><br>";
+  html += "<a href='/resetwifi?t=" + secretToken + "'><button>Reset WiFi</button></a><br><br>";
+  html += "<a href='/restart?t=" + secretToken + "'><button>Reiniciar ESP32</button></a>";
+
+  html += "</body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+
+// ================= CONFIG BACKEND =================
+void handleConfig() {
+
+  if (!allowed()) {
+    server.send(404, "text/plain", "Not Found");
+    return;
+  }
+
+  String html = "<html><body style='font-family:Arial;text-align:center;'>";
+  html += "<h2>Configurar Backend</h2>";
+
+  html += "<form action='/save' method='GET'>";
+  html += "<input style='width:80%' name='url' value='" + backendURL + "'>";
+  html += "<input type='hidden' name='t' value='" + secretToken + "'>";
+  html += "<br><br><button>Guardar</button>";
+  html += "</form>";
+
+  html += "</body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+
+// ================= GUARDAR CONFIG =================
+void handleSave() {
+
+  if (!allowed()) {
+    server.send(404, "text/plain", "Not Found");
+    return;
+  }
+
+  if (server.hasArg("url")) {
+    backendURL = server.arg("url");
+
+    prefs.begin("config", false);
+    prefs.putString("backend", backendURL);
+    prefs.end();
+  }
+
+  server.send(200, "text/html", "Guardado");
+
+  delay(1000);
+  ESP.restart();
+}
+
+
+// ================= RESET WIFI =================
+void handleResetWiFi() {
+
+  if (!allowed()) {
+    server.send(404, "text/plain", "Not Found");
+    return;
+  }
+
+  server.send(200, "text/html", "Borrando WiFi...");
+
+  delay(1000);
+
+  WiFiManager wm;
+  wm.resetSettings();   //BORRA CREDENCIALES
+
+  ESP.restart();
+}
+
+
+// ================= RESTART =================
+void handleRestart() {
+
+  if (!allowed()) {
+    server.send(404, "text/plain", "Not Found");
+    return;
+  }
+
+  server.send(200, "text/html", "Reiniciando...");
+
+  delay(1000);
+  ESP.restart();
+}
+
+
+// ================= SETUP =================
+void setup() {
+
+  Serial.begin(115200);
+
+  SPI.begin();
+  rfid.PCD_Init();
+
+  pinMode(LED_PIN, OUTPUT);
+
+  // cargar backend guardado
+  prefs.begin("config", true);
+  backendURL = prefs.getString("backend", "");
+  prefs.end();
+
+  // WIFI MANAGER
+  WiFiManager wm;
+  wm.autoConnect("NFC-Control");
+
+  Serial.println("WiFi conectado");
+
+  // mDNS (nombre local)
+  if (MDNS.begin("nfc-control")) {
+    Serial.println("Acceso: http://nfc-control.local");
+  }
+
+  // ROUTES
+  server.on("/", handleRoot);
+  server.on("/config", handleConfig);
+  server.on("/save", handleSave);
+  server.on("/resetwifi", handleResetWiFi);
+  server.on("/restart", handleRestart);
+
+  server.begin();
+
+  Serial.println("Panel listo");
+}
+
+
+// ================= LOOP =================
+void loop() {
+
+  server.handleClient();
+
+  if (!rfid.PICC_IsNewCardPresent()) return;
+  if (!rfid.PICC_ReadCardSerial()) return;
+
+  digitalWrite(LED_PIN, HIGH);
+
+  // UID
+  String uid = "";
+
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    if (rfid.uid.uidByte[i] < 0x10) uid += "0";
+    uid += String(rfid.uid.uidByte[i], HEX);
+  }
+
+  uid.toLowerCase();
+
+  Serial.println("UID: " + uid);
+
+  // ENVIAR A BACKEND
+  if (WiFi.status() == WL_CONNECTED && backendURL != "") {
+
+    WiFiClientSecure client;
+    client.setInsecure();
+
+    String url = backendURL + "/nfc/guardar.php?uid=" + uid;
+
+    HTTPClient http;
+    http.begin(client, url);
+
+    int code = http.GET();
+
+    Serial.print("HTTP: ");
+    Serial.println(code);
+
+    http.end();
+  }
+
+  digitalWrite(LED_PIN, LOW);
+
+  delay(2000);
+}
